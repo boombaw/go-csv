@@ -36,18 +36,13 @@ func main() {
 	f1, _ := os.Open(os.Getenv("CSV_PATH"))
 	defer f1.Close()
 
-	ts := time.Now()
-	te := time.Now().Sub(ts)
-
-	ts1 := time.Now()
+	start := time.Now()
 	concuRSwWP(f1)
-	te1 := time.Now().Sub(ts1)
 
 	createCsvFile()
 
 	// Read and Set to a map
-	fmt.Println("\nEND Basic: ", te)
-	fmt.Println("END Concu: ", te1)
+	fmt.Println("Done in : ", time.Since(start))
 }
 
 func createCsvFile() {
