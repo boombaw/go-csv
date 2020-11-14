@@ -1,7 +1,6 @@
-// main.go
-
 package main
 
+// Sample file for test: https://drive.google.com/file/d/1DFkJdX5UTnB_xL7g8xwkkdE8BxdurAhN/view?usp=sharing
 import (
 	"encoding/csv"
 	"encoding/json"
@@ -17,41 +16,38 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+type Geocode struct {
+	Lat  string `json:"lat"`
+	Long string `json:"long"`
+}
+
 type Response struct {
 	Prov, Kota, Kec, Kel, KodePos string
 }
 
-// var totalWorker = os.Getenv("WORKER")
-
-var dataHeaders = make([]string, 0)
-var g []Response
+var list []Response
+var mu sync.Mutex
 
 func init() {
 	_ = godotenv.Load()
 }
 
 func main() {
-	start := time.Now()
-	fmt.Println("Halo")
+	f1, _ := os.Open(os.Getenv("CSV_PATH"))
+	defer f1.Close()
 
-	csvReader, csvFile, err := openCsvFile()
-	if err != nil {
-		logrus.Fatal(err.Error())
-	}
-	defer csvFile.Close()
+	ts := time.Now()
+	te := time.Now().Sub(ts)
 
-	jobs := make(chan []interface{}, 0)
-	wg := new(sync.WaitGroup)
-
-	go dispatchWorkers(jobs, wg)
-	readCsvFilePerLineThenSendToWorker(csvReader, jobs, wg)
-
-	wg.Wait()
+	ts1 := time.Now()
+	concuRSwWP(f1)
+	te1 := time.Now().Sub(ts1)
 
 	createCsvFile()
 
-	duration := time.Since(start)
-	fmt.Println("done in", duration)
+	// Read and Set to a map
+	fmt.Println("\nEND Basic: ", te)
+	fmt.Println("END Concu: ", te1)
 }
 
 func createCsvFile() {
@@ -66,106 +62,100 @@ func createCsvFile() {
 	header := []string{"Provinsi", "Kota/Kab", "Kec", "Kel", "Kodepos"}
 	csvWriter := csv.NewWriter(file)
 	csvWriter.Write(header)
-	for _, v := range g {
+	for _, v := range list {
 		str := []string{v.Prov, v.Kota, v.Kec, v.Kel, v.KodePos}
 		csvWriter.Write(str)
 	}
 	csvWriter.Flush()
 }
 
-func openCsvFile() (*csv.Reader, *os.File, error) {
-	logrus.Info("Open CSV FILE")
+// with Worker pools
+func concuRSwWP(f *os.File) {
+	logrus.Infoln("Opening CSV File")
+	fcsv := csv.NewReader(f)
+	fcsv.FieldsPerRecord = -1
+	rs := make([]*Geocode, 0)
+	numWps, _ := strconv.Atoi(os.Getenv("WORKER"))
+	jobs := make(chan []string, numWps)
+	res := make(chan *Geocode)
 
-	file, err := os.Open(os.Getenv("CSV_PATH"))
-	if err != nil {
-		logrus.Error(err)
-		return nil, nil, err
-	}
-
-	reader := csv.NewReader(file)
-	return reader, file, nil
-}
-
-func dispatchWorkers(jobs <-chan []interface{}, wg *sync.WaitGroup) {
-	totalWorker, _ := strconv.ParseInt(os.Getenv("WORKER"), 10, 64)
-	for i := 0; i <= int(totalWorker); i++ {
-		go func(i int, jobs <-chan []interface{}, wg *sync.WaitGroup) {
-			counter := 0
-
-			for job := range jobs {
-				doTheJob(i, counter, job)
-				wg.Done()
-				counter++
-			}
-		}(i, jobs, wg)
-	}
-}
-
-func readCsvFilePerLineThenSendToWorker(csvReader *csv.Reader, jobs chan<- []interface{}, wg *sync.WaitGroup) {
-	for {
-		row, err := csvReader.Read()
-		if err != nil {
-			if err == io.EOF {
-				err = nil
-			}
-			break
-		}
-
-		if len(dataHeaders) == 0 {
-			dataHeaders = row
-			continue
-		}
-
-		rowOrdered := make([]interface{}, 0)
-		for _, each := range row {
-			rowOrdered = append(rowOrdered, each)
-		}
-
-		wg.Add(1)
-		jobs <- rowOrdered
-	}
-	close(jobs)
-}
-
-func doTheJob(i, counter int, values []interface{}) {
-
-	for {
-		var outerError error
-		func(outerError *error) {
-			defer func() {
-				if err := recover(); err != nil {
-					*outerError = fmt.Errorf("%v", err)
+	var wg sync.WaitGroup
+	worker := func(jobs <-chan []string, results chan<- *Geocode) {
+		for {
+			select {
+			case job, ok := <-jobs: // you must check for readable state of the channel.
+				if !ok {
+					return
 				}
-			}()
-
-			lat := values[0].(string)
-			long := values[1].(string)
-			_, body, _ := gorequest.New().Get(os.Getenv("MAPBOX_URL") + long + "," + lat + ".json?types=poi&access_token=" + os.Getenv("MAPBOX_TOKEN")).End()
-
-			var dat map[string]interface{}
-			if err := json.Unmarshal([]byte(body), &dat); err != nil {
-				logrus.Errorf("Cannot unmarshal string %v\n", err)
+				results <- parseStruct(job)
 			}
-			c := dat["features"].([]interface{})[0].(map[string]interface{})
-			ctx := c["context"].([]interface{})
-
-			var r Response
-			r.Kel = ctx[0].(map[string]interface{})["text"].(string)
-			r.KodePos = ctx[1].(map[string]interface{})["text"].(string)
-			r.Kec = ctx[2].(map[string]interface{})["text"].(string)
-			r.Kota = ctx[3].(map[string]interface{})["text"].(string)
-			r.Prov = ctx[3].(map[string]interface{})["text"].(string)
-
-			g = append(g, r)
-			counter++
-		}(&outerError)
-
-		if outerError == nil {
-			break
 		}
 	}
 
-	if counter%100 == 0 {
-		logrus.Infoln("=> worker", i, "inserted", counter, "data")
+	// init workers
+	for w := 0; w < numWps; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			worker(jobs, res)
+		}()
+	}
+
+	go func() {
+		for {
+			rStr, err := fcsv.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				fmt.Println("ERROR: ", err.Error())
+				break
+			}
+			jobs <- rStr
+		}
+		close(jobs) // close jobs to signal workers that no more job are incoming.
+	}()
+
+	go func() {
+		wg.Wait()
+		close(res) // when you close(res) it breaks the below loop.
+	}()
+
+	i := 0
+	for r := range res {
+		if i != 0 {
+			rs = append(rs, r)
+		}
+		i++
+	}
+
+	for _, v := range rs {
+		_, body, _ := gorequest.New().Get(os.Getenv("MAPBOX_URL") + v.Long + "," + v.Lat + ".json?access_token=" + os.Getenv("MAPBOX_TOKEN")).End()
+
+		var dat map[string]interface{}
+		if err := json.Unmarshal([]byte(body), &dat); err != nil {
+			logrus.Errorf("Cannot unmarshal string %v\n", err)
+		}
+		c := dat["features"].([]interface{})[0].(map[string]interface{})
+		ctx := c["context"].([]interface{})
+
+		var r Response
+		r.Kel = ctx[0].(map[string]interface{})["text"].(string)
+		r.KodePos = ctx[1].(map[string]interface{})["text"].(string)
+		r.Kec = ctx[2].(map[string]interface{})["text"].(string)
+		r.Kota = ctx[3].(map[string]interface{})["text"].(string)
+		r.Prov = ctx[3].(map[string]interface{})["text"].(string)
+
+		list = append(list, r)
+
+	}
+
+	fmt.Println("Count data ", len(rs))
+}
+
+func parseStruct(data []string) *Geocode {
+	return &Geocode{
+		Lat:  data[0],
+		Long: data[1],
 	}
 }
