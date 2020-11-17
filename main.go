@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -19,10 +20,11 @@ import (
 type Geocode struct {
 	Lat  string `json:"lat"`
 	Long string `json:"long"`
+	Kode string `json:"kode"`
 }
 
 type Response struct {
-	Prov, Kota, Kec, Kel, KodePos string
+	Prov, Kota, Kec, Kel, KodePos, Kode string
 }
 
 var list []Response
@@ -54,11 +56,13 @@ func createCsvFile() {
 		os.Exit(1)
 	}
 
-	header := []string{"Provinsi", "Kota/Kab", "Kec", "Kel", "Kodepos"}
+	header := []string{"Provinsi", "Kota/Kab", "Kec", "Kel", "Kodepos", "Kode"}
 	csvWriter := csv.NewWriter(file)
 	csvWriter.Write(header)
-	for _, v := range list {
-		str := []string{v.Prov, v.Kota, v.Kec, v.Kel, v.KodePos}
+	total := len(list)
+	for i, v := range list {
+		logrus.Info("Write data ", i, " to ", total)
+		str := []string{v.Prov, v.Kota, v.Kec, v.Kel, v.KodePos, v.Kode}
 		csvWriter.Write(str)
 	}
 	csvWriter.Flush()
@@ -124,26 +128,64 @@ func concuRSwWP(f *os.File) {
 		i++
 	}
 
+	URL := os.Getenv("MAPBOX_URL")
+	token := os.Getenv("MAPBOX_TOKEN")
+	total := len(rs)
+
+	index := 0
+	wg.Add(total)
+	var mu sync.Mutex
 	for _, v := range rs {
-		_, body, _ := gorequest.New().Get(os.Getenv("MAPBOX_URL") + v.Long + "," + v.Lat + ".json?access_token=" + os.Getenv("MAPBOX_TOKEN")).End()
+		go func(long, lat, kode string) {
+			mu.Lock()
 
-		var dat map[string]interface{}
-		if err := json.Unmarshal([]byte(body), &dat); err != nil {
-			logrus.Errorf("Cannot unmarshal string %v\n", err)
-		}
-		c := dat["features"].([]interface{})[0].(map[string]interface{})
-		ctx := c["context"].([]interface{})
+			request := gorequest.New()
+			_, body, err := request.Get(URL + long + "," + lat + ".json?access_token=" + token).End()
 
-		var r Response
-		r.Kel = ctx[0].(map[string]interface{})["text"].(string)
-		r.KodePos = ctx[1].(map[string]interface{})["text"].(string)
-		r.Kec = ctx[2].(map[string]interface{})["text"].(string)
-		r.Kota = ctx[3].(map[string]interface{})["text"].(string)
-		r.Prov = ctx[3].(map[string]interface{})["text"].(string)
+			if err != nil {
+				logrus.Error(err)
+			}
 
-		list = append(list, r)
+			var dat map[string]interface{}
+			if err := json.Unmarshal([]byte(body), &dat); err != nil {
+				logrus.Errorf("Cannot unmarshal string %v\n", err)
+			}
+			var r Response
 
+			if dat["features"].([]interface{}) != nil {
+
+				c := dat["features"].([]interface{})[0].(map[string]interface{})
+				ctx := c["context"].([]interface{})
+
+				r.Kel = ctx[0].(map[string]interface{})["text"].(string)
+				r.KodePos = ctx[1].(map[string]interface{})["text"].(string)
+				r.Kec = ctx[2].(map[string]interface{})["text"].(string)
+				r.Kota = ctx[3].(map[string]interface{})["text"].(string)
+				r.Prov = ctx[3].(map[string]interface{})["text"].(string)
+				r.Kode = kode
+			} else {
+				r.Kel = ""
+				r.KodePos = ""
+				r.Kec = ""
+				r.Kota = ""
+				r.Prov = ""
+				r.Kode = kode
+
+				logrus.Errorf("dat %v : \n", dat)
+			}
+
+			runtime.Gosched()
+			list = append(list, r)
+			mu.Unlock()
+			wg.Done()
+		}(v.Long, v.Lat, v.Kode)
+
+		index++
+		logrus.Infoln("Processing data ", index, " from ", total)
 	}
+
+	logrus.Infoln("Waiting to process write data...")
+	wg.Wait()
 
 	fmt.Println("Count data ", len(rs))
 }
@@ -152,5 +194,6 @@ func parseStruct(data []string) *Geocode {
 	return &Geocode{
 		Lat:  data[0],
 		Long: data[1],
+		Kode: data[2],
 	}
 }
