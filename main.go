@@ -134,46 +134,34 @@ func concuRSwWP(f *os.File) {
 	index := 0
 
 	for _, v := range rs {
-		go func(long, lat, kode string) {
-			defer wg.Done()
-			wg.Add(1)
-			request := gorequest.New()
-			_, body, err := request.Get(URL + long + "," + lat + ".json?access_token=" + token).End()
 
-			if err != nil {
-				logrus.Error(err)
-			}
+		request := gorequest.New()
+		_, body, err := request.Get(URL + v.Long + "," + v.Lat + ".json?access_token=" + token).End()
 
-			var dat map[string]interface{}
-			if err := json.Unmarshal([]byte(body), &dat); err != nil {
-				logrus.Errorf("Cannot unmarshal string %v\n", err)
-			}
-			var r Response
+		if err != nil {
+			logrus.Error(err)
+		}
 
-			if dat["features"].([]interface{}) != nil {
+		var dat map[string]interface{}
+		if err := json.Unmarshal([]byte(body), &dat); err != nil {
+			logrus.Errorf("Cannot unmarshal string %v\n", err)
+		}
+		var r Response
 
-				c := dat["features"].([]interface{})[0].(map[string]interface{})
-				ctx := c["context"].([]interface{})
+		if dat["features"].([]interface{}) != nil {
 
-				r.Kel = ctx[0].(map[string]interface{})["text"].(string)
-				r.KodePos = ctx[1].(map[string]interface{})["text"].(string)
-				r.Kec = ctx[2].(map[string]interface{})["text"].(string)
-				r.Kota = ctx[3].(map[string]interface{})["text"].(string)
-				r.Prov = ctx[3].(map[string]interface{})["text"].(string)
-				r.Kode = kode
-			} else {
-				r.Kel = ""
-				r.KodePos = ""
-				r.Kec = ""
-				r.Kota = ""
-				r.Prov = ""
-				r.Kode = kode
+			c := dat["features"].([]interface{})[0].(map[string]interface{})
+			ctx := c["context"].([]interface{})
 
-				logrus.Errorf("dat %v : \n", dat)
-			}
+			r.Kel = ctx[0].(map[string]interface{})["text"].(string)
+			r.KodePos = ctx[1].(map[string]interface{})["text"].(string)
+			r.Kec = ctx[2].(map[string]interface{})["text"].(string)
+			r.Kota = ctx[3].(map[string]interface{})["text"].(string)
+			r.Prov = ctx[3].(map[string]interface{})["text"].(string)
+			r.Kode = v.Kode
+		}
 
-			list = append(list, r)
-		}(v.Long, v.Lat, v.Kode)
+		list = append(list, r)
 
 		index++
 		logrus.Infoln("Processing data ", index, " from ", total)
